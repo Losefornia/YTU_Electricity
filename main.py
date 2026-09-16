@@ -1,6 +1,6 @@
 # main.py
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
-from astrbot.api.message_components import At
+from astrbot.api.message_components import At, Plain
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 import re
@@ -20,10 +20,6 @@ FETCH_INTERVAL_MIN = 60
 
 
 def _calc_day_usage(addr, day):
-    """
-    计算某一天（10:00 到次日 10:00）的用电量。
-    返回 None 表示数据不足。
-    """
     if day.hour < 10:
         start = (day - timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
     else:
@@ -57,7 +53,6 @@ class DianFeiPlugin(Star):
         self._fetch_task = asyncio.create_task(self._fetch_loop())
 
     async def _fetch_loop(self):
-        """每小时抓一次所有已绑定宿舍"""
         try:
             await spider.fetch_all_bound()
             await self._check_alerts()
@@ -72,7 +67,6 @@ class DianFeiPlugin(Star):
                 logger.warning(f"定时抓取异常: {e}")
 
     async def _check_alerts(self):
-        """检查所有已绑定宿舍的余额，低于阈值主动推送（@ 到人）"""
         addrs = db.get_bound_addrs()
         for addr in addrs:
             result = db.get_user_balance(addr)
@@ -81,14 +75,12 @@ class DianFeiPlugin(Star):
 
             balance = result["balance"]
 
-            # 余额回升到阈值以上，自动解除忽略
             if balance >= ALERT_THRESHOLD:
                 if db.is_ignored(addr):
                     db.remove_ignore(addr)
                     logger.info(f"✅ {addr} 余额回升，自动解除忽略")
                 continue
 
-            # 被忽略的，跳过
             if db.is_ignored(addr):
                 continue
 
@@ -106,9 +98,7 @@ class DianFeiPlugin(Star):
 
             for umo, openid in users:
                 try:
-                    chain = MessageChain()
-                    chain.chain.append(At(qq=openid))
-                    chain.message(text)
+                    chain = MessageChain(chain=[At(qq=openid), Plain(text)])
                     await self.context.send_message(umo, chain)
                     logger.info(f"🔔 已推送预警：{addr} 余额 {balance} 元 → {openid}")
                 except Exception as e:
@@ -122,10 +112,7 @@ class DianFeiPlugin(Star):
         parts = event.message_str.split()
 
         def at_reply(text):
-            chain = MessageChain()
-            chain.chain.append(At(qq=openid))
-            chain.message(text)
-            return event.chain_result([chain])
+            return event.chain_result([At(qq=openid), Plain(text)])
 
         if len(parts) < 2:
             yield at_reply("\n📖 格式：绑定 宿舍号\n示例：绑定 NS07N0488")
@@ -160,10 +147,7 @@ class DianFeiPlugin(Star):
         addr = db.get_bind_addr(openid)
 
         def at_reply(text):
-            chain = MessageChain()
-            chain.chain.append(At(qq=openid))
-            chain.message(text)
-            return event.chain_result([chain])
+            return event.chain_result([At(qq=openid), Plain(text)])
 
         if not addr:
             yield at_reply("\n❌ 你还没有绑定宿舍")
@@ -178,10 +162,7 @@ class DianFeiPlugin(Star):
         addr = db.get_bind_addr(openid)
 
         def at_reply(text):
-            chain = MessageChain()
-            chain.chain.append(At(qq=openid))
-            chain.message(text)
-            return event.chain_result([chain])
+            return event.chain_result([At(qq=openid), Plain(text)])
 
         if not addr:
             yield at_reply("\n❌ 你还没有绑定宿舍")
@@ -193,17 +174,14 @@ class DianFeiPlugin(Star):
             f"💡 当余额回升至 {ALERT_THRESHOLD} 元以上时自动恢复"
         )
 
-    # ===== 查询（14 天日用电） =====
+    # ===== 查询 =====
     @filter.command("查")
     async def query(self, event: AstrMessageEvent):
         openid = event.get_sender_id()
         addr = db.get_bind_addr(openid)
 
         def at_reply(text):
-            chain = MessageChain()
-            chain.chain.append(At(qq=openid))
-            chain.message(text)
-            return event.chain_result([chain])
+            return event.chain_result([At(qq=openid), Plain(text)])
 
         if not addr:
             yield at_reply("\n❌ 你还没有绑定宿舍，请发送「绑定 宿舍号」")
@@ -268,17 +246,14 @@ class DianFeiPlugin(Star):
             f"🕐 更新时间：{record_time}{warn}"
         )
 
-    # ===== 详情（小时图，仅供参考） =====
+    # ===== 详情 =====
     @filter.command("详情")
     async def detail(self, event: AstrMessageEvent):
         openid = event.get_sender_id()
         addr = db.get_bind_addr(openid)
 
         def at_reply(text):
-            chain = MessageChain()
-            chain.chain.append(At(qq=openid))
-            chain.message(text)
-            return event.chain_result([chain])
+            return event.chain_result([At(qq=openid), Plain(text)])
 
         if not addr:
             yield at_reply("\n❌ 你还没有绑定宿舍")
