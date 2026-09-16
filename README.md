@@ -1,14 +1,41 @@
-# astrbot-plugin-helloworld
+# 校园Doro
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+> 烟台大学校园生活助手插件（AstrBot 版）
+> 电费查询 · 学校新闻 · 低余额预警
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+一个基于 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的校园生活助手插件。
+形象参考《原神》海沫村记者 **洛梅**，定位是「帮你盯电费、给你带新闻」的校园小助手。
 
-# Supports
+---
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+## ✨ 功能
+
+- **宿舍绑定**：群里发送 `绑定 宿舍号` 即可绑定
+- **电费查询**：`/查` — 余额、状态、近 14 天每日用电、日均、预计可用天数
+- **小时详情**：`/详情` — 近 24 小时用电柱状图（仅供参考）
+- **低余额预警**：余额低于阈值时主动在群里 @ 提醒
+- **忽略预警**：`/忽略` — 屏蔽提醒，直到余额回升到阈值以上自动恢复
+- **定时抓取**：每小时自动爬取一次所有已绑定宿舍的余额
+- **流式解析**：边下载边解析 HTML，内存占用可控，避免大页面导致服务器 I/O 爆炸
+
+---
+
+## 📦 项目结构
+YTU_Electricity/
+├── main.py # 插件入口，命令注册
+├── spider.py # 爬虫，流式解析电费页面
+├── db.py # SQLite 数据库操作
+├── utils.py # 工具函数（地址匹配、用电计算等）
+├── metadata.yaml # 插件元数据
+├── requirements.txt # 依赖
+└── README.md
+
+---
+
+## 🚀 安装
+
+### 1. 确保已安装 AstrBot
+
+参考官方文档：[AstrBot 部署指南](https://docs.astrbot.app/deploy/install.html)
+
+### 2. 添加插件,粘贴仓库链接
