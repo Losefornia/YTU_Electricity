@@ -38,9 +38,21 @@ def init_tables():
         CREATE TABLE IF NOT EXISTS user_bind (
             openid TEXT PRIMARY KEY,
             user_addr TEXT NOT NULL,
-            bind_time TEXT
+            bind_time TEXT,
+            umo TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS alert_ignore (
+            user_addr TEXT PRIMARY KEY,
+            ignore_since TEXT
+        )
+    """)
+    # 兼容旧表：如果没有 umo 列就补上
+    try:
+        conn.execute("ALTER TABLE user_bind ADD COLUMN umo TEXT")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -59,6 +71,13 @@ def query_all(sql, params=None):
     return rows
 
 
+def execute(sql, params=None):
+    conn = get_db()
+    conn.execute(sql, params or ())
+    conn.commit()
+    conn.close()
+
+
 def get_bind_addr(openid):
     row = query_one("SELECT user_addr FROM user_bind WHERE openid=?", (openid,))
     return row["user_addr"] if row else None
@@ -69,21 +88,24 @@ def get_bind_users(addr):
     return [r["openid"] for r in rows]
 
 
-def bind_user(openid, addr):
-    conn = get_db()
-    conn.execute(
-        "INSERT OR REPLACE INTO user_bind (openid, user_addr, bind_time) VALUES (?, ?, ?)",
-        (openid, addr, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+def get_bind_umos_and_openids(addr):
+    """返回 [(umo, openid), ...]"""
+    rows = query_all(
+        "SELECT umo, openid FROM user_bind WHERE user_addr=? AND umo IS NOT NULL",
+        (addr,),
     )
-    conn.commit()
-    conn.close()
+    return [(r["umo"], r["openid"]) for r in rows]
+
+
+def bind_user(openid, addr, umo=None):
+    execute(
+        "INSERT OR REPLACE INTO user_bind (openid, user_addr, bind_time, umo) VALUES (?, ?, ?, ?)",
+        (openid, addr, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), umo),
+    )
 
 
 def unbind_user(openid):
-    conn = get_db()
-    conn.execute("DELETE FROM user_bind WHERE openid=?", (openid,))
-    conn.commit()
-    conn.close()
+    execute("DELETE FROM user_bind WHERE openid=?", (openid,))
 
 
 def get_user_balance(addr):
@@ -136,7 +158,7 @@ def save_records(records):
     conn.executemany(
         "INSERT INTO meter_records (record_time, user_no, user_name, user_addr, balance) "
         "VALUES (?, ?, ?, ?, ?)",
-        records
+        records,
     )
     conn.commit()
     conn.close()
@@ -208,3 +230,21 @@ def clean_db_by_size():
 
     print("🧹 按大小清理完成")
     conn.close()
+
+
+# ===== 忽略预警相关 =====
+
+def set_ignore(addr):
+    execute(
+        "INSERT OR REPLACE INTO alert_ignore (user_addr, ignore_since) VALUES (?, ?)",
+        (addr, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+
+
+def remove_ignore(addr):
+    execute("DELETE FROM alert_ignore WHERE user_addr=?", (addr,))
+
+
+def is_ignored(addr):
+    row = query_one("SELECT 1 FROM alert_ignore WHERE user_addr=?", (addr,))
+    return row is not None
