@@ -14,8 +14,8 @@ from .utils import (
     PRICE_PER_KWH, calc_usage_with_recharge,
 )
 
-ALERT_THRESHOLD = 999
-WARN_THRESHOLD = 1
+ALERT_THRESHOLD = 5      # 余额低于 5 元 → 主动发预警
+WARN_THRESHOLD = 50      # 余额低于 50 元 → /查 显示「🟠 预警」
 FETCH_INTERVAL_MIN = 60
 
 
