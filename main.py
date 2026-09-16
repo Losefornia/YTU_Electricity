@@ -14,7 +14,7 @@ from .utils import (
     PRICE_PER_KWH, calc_usage_with_recharge,
 )
 
-ALERT_THRESHOLD = 5
+ALERT_THRESHOLD = 999
 WARN_THRESHOLD = 50
 FETCH_INTERVAL_MIN = 60
 
