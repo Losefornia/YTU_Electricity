@@ -1,6 +1,6 @@
 # main.py
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
-from astrbot.api.message_components import At, Plain
+from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 import re
@@ -15,7 +15,7 @@ from .utils import (
 )
 
 ALERT_THRESHOLD = 999
-WARN_THRESHOLD = 50
+WARN_THRESHOLD = 1
 FETCH_INTERVAL_MIN = 60
 
 
@@ -98,7 +98,9 @@ class DianFeiPlugin(Star):
 
             for umo, openid in users:
                 try:
-                    chain = MessageChain(chain=[At(qq=openid), Plain(text)])
+                    at_tag = f'<qqbot-at-user id="{openid}" />'
+                    full_text = f"{at_tag}\n{text}"
+                    chain = MessageChain(chain=[Plain(full_text)])
                     await self.context.send_message(umo, chain)
                     logger.info(f"🔔 已推送预警：{addr} 余额 {balance} 元 → {openid}")
                 except Exception as e:
@@ -112,7 +114,8 @@ class DianFeiPlugin(Star):
         parts = event.message_str.split()
 
         def at_reply(text):
-            return event.chain_result([At(qq=openid), Plain(text)])
+            at_tag = f'<qqbot-at-user id="{openid}" />'
+            return event.chain_result([Plain(f"{at_tag}\n{text}")])
 
         if len(parts) < 2:
             yield at_reply("\n📖 格式：绑定 宿舍号\n示例：绑定 NS07N0488")
@@ -147,7 +150,8 @@ class DianFeiPlugin(Star):
         addr = db.get_bind_addr(openid)
 
         def at_reply(text):
-            return event.chain_result([At(qq=openid), Plain(text)])
+            at_tag = f'<qqbot-at-user id="{openid}" />'
+            return event.chain_result([Plain(f"{at_tag}\n{text}")])
 
         if not addr:
             yield at_reply("\n❌ 你还没有绑定宿舍")
@@ -162,7 +166,8 @@ class DianFeiPlugin(Star):
         addr = db.get_bind_addr(openid)
 
         def at_reply(text):
-            return event.chain_result([At(qq=openid), Plain(text)])
+            at_tag = f'<qqbot-at-user id="{openid}" />'
+            return event.chain_result([Plain(f"{at_tag}\n{text}")])
 
         if not addr:
             yield at_reply("\n❌ 你还没有绑定宿舍")
@@ -181,7 +186,8 @@ class DianFeiPlugin(Star):
         addr = db.get_bind_addr(openid)
 
         def at_reply(text):
-            return event.chain_result([At(qq=openid), Plain(text)])
+            at_tag = f'<qqbot-at-user id="{openid}" />'
+            return event.chain_result([Plain(f"{at_tag}\n{text}")])
 
         if not addr:
             yield at_reply("\n❌ 你还没有绑定宿舍，请发送「绑定 宿舍号」")
@@ -253,7 +259,8 @@ class DianFeiPlugin(Star):
         addr = db.get_bind_addr(openid)
 
         def at_reply(text):
-            return event.chain_result([At(qq=openid), Plain(text)])
+            at_tag = f'<qqbot-at-user id="{openid}" />'
+            return event.chain_result([Plain(f"{at_tag}\n{text}")])
 
         if not addr:
             yield at_reply("\n❌ 你还没有绑定宿舍")
