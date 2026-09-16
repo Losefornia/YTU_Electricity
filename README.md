@@ -23,11 +23,17 @@
 ## 📦 项目结构
 YTU_Electricity/
 ├── main.py # 插件入口，命令注册
+
 ├── spider.py # 爬虫，流式解析电费页面
+
 ├── db.py # SQLite 数据库操作
+
 ├── utils.py # 工具函数（地址匹配、用电计算等）
+
 ├── metadata.yaml # 插件元数据
+
 ├── requirements.txt # 依赖
+
 └── README.md
 
 ---
