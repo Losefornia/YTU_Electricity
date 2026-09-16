@@ -32,7 +32,6 @@ YTU_Electricity/
 
 ├── metadata.yaml # 插件元数据
 
-├── requirements.txt # 依赖
 
 └── README.md
 
