@@ -1,4 +1,3 @@
-![Uploading d2dff6741b3ef9b144068f21d850fa38.png…]()
 烟大YTU电表AstrBot插件
 
 > 烟台大学校园生活助手插件（AstrBot 版）
