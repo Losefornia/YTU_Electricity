@@ -1,4 +1,7 @@
+# db.py
 import sqlite3
+import os
+import time
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -12,8 +15,9 @@ KEEP_RECORDS = 2000
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=20)
     conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -41,17 +45,27 @@ def init_tables():
     conn.close()
 
 
-def get_bind_addr(openid):
+def query_one(sql, params=None):
     conn = get_db()
-    row = conn.execute("SELECT user_addr FROM user_bind WHERE openid=?", (openid,)).fetchone()
+    row = conn.execute(sql, params or ()).fetchone()
     conn.close()
+    return row
+
+
+def query_all(sql, params=None):
+    conn = get_db()
+    rows = conn.execute(sql, params or ()).fetchall()
+    conn.close()
+    return rows
+
+
+def get_bind_addr(openid):
+    row = query_one("SELECT user_addr FROM user_bind WHERE openid=?", (openid,))
     return row["user_addr"] if row else None
 
 
 def get_bind_users(addr):
-    conn = get_db()
-    rows = conn.execute("SELECT openid FROM user_bind WHERE user_addr=?", (addr,)).fetchall()
-    conn.close()
+    rows = query_all("SELECT openid FROM user_bind WHERE user_addr=?", (addr,))
     return [r["openid"] for r in rows]
 
 
@@ -73,26 +87,20 @@ def unbind_user(openid):
 
 
 def get_user_balance(addr):
-    conn = get_db()
-    row = conn.execute(
+    return query_one(
         "SELECT user_name, balance, record_time FROM meter_records "
         "WHERE user_addr=? ORDER BY id DESC LIMIT 1",
-        (addr,)
-    ).fetchone()
-    conn.close()
-    return row
+        (addr,),
+    )
 
 
 def get_balance_history(addr, hours=24):
     cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
-    conn = get_db()
-    rows = conn.execute(
+    return query_all(
         "SELECT record_time, balance FROM meter_records "
         "WHERE user_addr=? AND record_time>=? ORDER BY record_time ASC",
-        (addr, cutoff)
-    ).fetchall()
-    conn.close()
-    return rows
+        (addr, cutoff),
+    )
 
 
 def get_hourly_usage(addr, hours=24):
@@ -100,14 +108,24 @@ def get_hourly_usage(addr, hours=24):
     rows = get_balance_history(addr, hours)
     if len(rows) < 2:
         return {}
+
     hourly_data = {}
     for i in range(1, len(rows)):
+        prev_time = datetime.strptime(rows[i - 1]["record_time"], "%Y-%m-%d %H:%M:%S")
         curr_time = datetime.strptime(rows[i]["record_time"], "%Y-%m-%d %H:%M:%S")
-        hour_key = curr_time.strftime("%m-%d %H:00")
-        diff = rows[i - 1]["balance"] - rows[i]["balance"]
-        if diff > 0:
-            usage = round(diff / PRICE_PER_KWH, 2)
-            hourly_data[hour_key] = hourly_data.get(hour_key, 0) + usage
+        prev_balance = rows[i - 1]["balance"]
+        curr_balance = rows[i]["balance"]
+
+        diff = prev_balance - curr_balance
+        if diff <= 0:
+            continue
+
+        hours_span = max(1, int((curr_time - prev_time).total_seconds() / 3600))
+        for h in range(hours_span):
+            t = prev_time + timedelta(hours=h)
+            key = t.strftime("%m-%d %H:00")
+            hourly_data[key] = hourly_data.get(key, 0) + (diff / PRICE_PER_KWH / hours_span)
+
     return hourly_data
 
 
@@ -125,9 +143,7 @@ def save_records(records):
 
 
 def get_bound_addrs():
-    conn = get_db()
-    rows = conn.execute("SELECT DISTINCT user_addr FROM user_bind").fetchall()
-    conn.close()
+    rows = query_all("SELECT DISTINCT user_addr FROM user_bind")
     return [r["user_addr"] for r in rows]
 
 
@@ -156,23 +172,39 @@ def clean_unbound_old_data():
 
 
 def clean_db_by_size():
-    import os
     if not os.path.exists(DB_PATH):
         return
     db_size = os.path.getsize(DB_PATH) / (1024 * 1024)
     if db_size <= MAX_DB_SIZE_MB:
         return
+
     conn = get_db()
     cursor = conn.execute("SELECT COUNT(*) FROM meter_records")
     total = cursor.fetchone()[0]
-    if total > KEEP_RECORDS:
-        row = conn.execute(
-            f"SELECT id FROM meter_records ORDER BY id DESC LIMIT 1 OFFSET {KEEP_RECORDS}"
-        ).fetchone()
-        if row:
-            cutoff_id = row[0]
-            cursor = conn.execute("DELETE FROM meter_records WHERE id < ?", (cutoff_id,))
-            deleted = cursor.rowcount
-            conn.commit()
-            print(f"🧹 按大小清理：删除了 {deleted} 条旧记录")
+    if total <= KEEP_RECORDS:
+        conn.close()
+        return
+
+    row = conn.execute(
+        f"SELECT id FROM meter_records ORDER BY id DESC LIMIT 1 OFFSET {KEEP_RECORDS}"
+    ).fetchone()
+    if not row:
+        conn.close()
+        return
+    cutoff_id = row[0]
+
+    while True:
+        cursor = conn.execute(
+            "DELETE FROM meter_records WHERE id IN ("
+            "  SELECT id FROM meter_records WHERE id < ? LIMIT 500"
+            ")",
+            (cutoff_id,),
+        )
+        deleted = cursor.rowcount
+        conn.commit()
+        if deleted == 0:
+            break
+        time.sleep(0.1)
+
+    print("🧹 按大小清理完成")
     conn.close()
