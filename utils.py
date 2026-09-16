@@ -103,7 +103,7 @@ def draw_bar_chart(data, max_bars=12):
         time_range = f"{date} {hour:02d}:00-{next_hour:02d}:00"
         if usage > 0:
             bar_len = max(1, min(int(usage * 0.8), 8))
-            chart.append(f"{time_range} {'█' * bar_len} {usage}度")
+            chart.append(f"{time_range} {'█' * bar_len} {usage:.3f}度")   # ← 改这里
         else:
             chart.append(f"{time_range} 无数据")
     return '\n'.join(chart) if chart else "暂无数据"
