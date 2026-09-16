@@ -15,7 +15,7 @@ from .utils import (
 )
 
 ALERT_THRESHOLD = 5      # 余额低于 5 元 → 主动发预警
-WARN_THRESHOLD = 50      # 余额低于 50 元 → /查 显示「🟠 预警」
+WARN_THRESHOLD = 15      # 余额低于 15 元 → /查 显示「🟠 预警」
 FETCH_INTERVAL_MIN = 60
 
 
@@ -218,7 +218,7 @@ class DianFeiPlugin(Star):
             else:
                 bar = "█" * max(1, min(int(usage * 0.8), 8))
                 cost = round(usage * PRICE_PER_KWH, 2)
-                days_detail.append(f"{label} {bar} {usage:.2f}度（{cost}元）")
+                days_detail.append(f"{label} {bar} {usage:.3f}度（{cost}元）")
                 valid_usages.append(usage)
 
         if valid_usages:
@@ -235,15 +235,17 @@ class DianFeiPlugin(Star):
         warn = f"\n⚠️ 余额不足{ALERT_THRESHOLD}元，请及时充值！" if balance < ALERT_THRESHOLD else ""
 
         detail_text = "\n".join(days_detail)
+        today_text = f"{today_usage:.3f}" if today_usage is not None else "--"
+        yesterday_text = f"{yesterday_usage:.3f}" if yesterday_usage is not None else "--"
 
         yield at_reply(
             f"\n🏠 {addr} {display_name}\n"
             f"💰 余额：{balance} 元\n"
             f"📊 状态：{status}\n"
             f"━━━━━━━━━━━━━━━━\n"
-            f"⚡ 今日用电：{today_usage if today_usage is not None else '--'} 度\n"
-            f"⚡ 昨日用电：{yesterday_usage if yesterday_usage is not None else '--'} 度\n"
-            f"📊 近14天日均：{avg_usage} 度/天\n"
+            f"⚡ 今日用电：{today_text} 度\n"
+            f"⚡ 昨日用电：{yesterday_text} 度\n"
+            f"📊 近14天日均：{avg_usage:.3f} 度/天\n"
             f"💰 日均电费：{avg_cost} 元/天\n"
             f"📅 预计可用：{days_left_text}\n"
             f"━━━━━━━━━━━━━━━━\n"
