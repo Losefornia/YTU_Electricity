@@ -1,11 +1,14 @@
 # db.py
 import sqlite3
 import os
-import time
 from pathlib import Path
 from datetime import datetime, timedelta
 
-DATA_DIR = Path("data/plugin_data/astrbot_plugin_dianfei")
+try:
+    from astrbot.api.star import StarTools
+    DATA_DIR = StarTools.get_data_dir() / "astrbot_plugin_dianfei"
+except Exception:
+    DATA_DIR = Path("data/plugin_data/astrbot_plugin_dianfei")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "meters_data.db"
 
@@ -34,6 +37,16 @@ def init_tables():
             balance REAL
         )
     """)
+    # 唯一索引：同时间同地址不重复插
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_record
+        ON meter_records (record_time, user_addr)
+    """)
+    # 查询索引
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_addr_time
+        ON meter_records (user_addr, record_time)
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS user_bind (
             openid TEXT PRIMARY KEY,
@@ -48,7 +61,6 @@ def init_tables():
             ignore_since TEXT
         )
     """)
-    # 兼容旧表：如果没有 umo 列就补上
     try:
         conn.execute("ALTER TABLE user_bind ADD COLUMN umo TEXT")
     except Exception:
@@ -89,7 +101,6 @@ def get_bind_users(addr):
 
 
 def get_bind_umos_and_openids(addr):
-    """返回 [(umo, openid), ...]"""
     rows = query_all(
         "SELECT umo, openid FROM user_bind WHERE user_addr=? AND umo IS NOT NULL",
         (addr,),
@@ -152,11 +163,12 @@ def get_hourly_usage(addr, hours=24):
 
 
 def save_records(records):
+    """批量写入，同时间同地址自动去重。"""
     if not records:
         return
     conn = get_db()
     conn.executemany(
-        "INSERT INTO meter_records (record_time, user_no, user_name, user_addr, balance) "
+        "INSERT OR IGNORE INTO meter_records (record_time, user_no, user_name, user_addr, balance) "
         "VALUES (?, ?, ?, ?, ?)",
         records,
     )
@@ -180,8 +192,14 @@ def clean_old_data():
 
 
 def clean_unbound_old_data():
-    cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+    """删除已解绑宿舍的旧数据。如果没有任何绑定，直接返回，避免误删全表。"""
     conn = get_db()
+    bound_count = conn.execute("SELECT COUNT(*) FROM user_bind").fetchone()[0]
+    if bound_count == 0:
+        conn.close()
+        return 0
+
+    cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
     cursor = conn.execute("""
         DELETE FROM meter_records 
         WHERE user_addr NOT IN (SELECT user_addr FROM user_bind)
@@ -194,6 +212,7 @@ def clean_unbound_old_data():
 
 
 def clean_db_by_size():
+    """数据库超过阈值时，一次性删到 KEEP_RECORDS 条。不分批、不循环、不 sleep。"""
     if not os.path.exists(DB_PATH):
         return
     db_size = os.path.getsize(DB_PATH) / (1024 * 1024)
@@ -201,35 +220,25 @@ def clean_db_by_size():
         return
 
     conn = get_db()
-    cursor = conn.execute("SELECT COUNT(*) FROM meter_records")
-    total = cursor.fetchone()[0]
+    total = conn.execute("SELECT COUNT(*) FROM meter_records").fetchone()[0]
     if total <= KEEP_RECORDS:
         conn.close()
         return
 
     row = conn.execute(
-        f"SELECT id FROM meter_records ORDER BY id DESC LIMIT 1 OFFSET {KEEP_RECORDS}"
+        "SELECT id FROM meter_records ORDER BY id DESC LIMIT 1 OFFSET ?",
+        (KEEP_RECORDS,),
     ).fetchone()
     if not row:
         conn.close()
         return
     cutoff_id = row[0]
 
-    while True:
-        cursor = conn.execute(
-            "DELETE FROM meter_records WHERE id IN ("
-            "  SELECT id FROM meter_records WHERE id < ? LIMIT 500"
-            ")",
-            (cutoff_id,),
-        )
-        deleted = cursor.rowcount
-        conn.commit()
-        if deleted == 0:
-            break
-        time.sleep(0.1)
-
-    print("🧹 按大小清理完成")
+    cursor = conn.execute("DELETE FROM meter_records WHERE id < ?", (cutoff_id,))
+    deleted = cursor.rowcount
+    conn.commit()
     conn.close()
+    print(f"🧹 按大小清理完成，删除 {deleted} 条")
 
 
 # ===== 忽略预警相关 =====
