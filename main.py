@@ -53,6 +53,7 @@ class DianFeiPlugin(Star):
         self._fetch_task = asyncio.create_task(self._fetch_loop())
 
     async def _fetch_loop(self):
+        await asyncio.sleep(60)   # 插件加载后等 60 秒再抓第一次
         try:
             await spider.fetch_all_bound()
             await self._check_alerts()
