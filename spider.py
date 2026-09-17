@@ -17,9 +17,9 @@ REQUEST_TIMEOUT = 30
 
 # ===== 爬取节奏参数 =====
 MAX_BUFFER_SIZE = 1 * 1024 * 1024   # 缓冲区上限 1MB
-PANEL_SLEEP = 0.01                  # 每解析 10 个 panel 歇一下
+PANEL_SLEEP = 0.05                  # 每解析 10 个 panel 歇一下
 BATCH_SIZE = 20                     # 每批写库 20 条
-BATCH_SLEEP = 1                     # 每批写库之间歇 1 秒
+BATCH_SLEEP = 2                     # 每批写库之间歇 2 秒
 
 
 def parse_one_panel(panel_html: str):
@@ -128,7 +128,7 @@ async def fetch_specific(addrs):
     if records:
         for i in range(0, len(records), BATCH_SIZE):
             batch = records[i:i + BATCH_SIZE]
-            db.save_records(batch)
+            await asyncio.to_thread(db.save_records, batch)
             await asyncio.sleep(BATCH_SLEEP)
         print(f"✅ 入库 {len(records)} 条")
 
@@ -140,9 +140,12 @@ async def fetch_all_bound():
         return
     await fetch_specific(addrs)
 
-    # 清理旧数据
-    deleted1 = db.clean_old_data()
-    deleted2 = db.clean_unbound_old_data()
-    db.clean_db_by_size()
-    if deleted1 or deleted2:
-        print(f"🧹 清理旧数据: {deleted1 + deleted2} 条")
+    # 清理旧数据（放线程池，不阻塞事件循环）
+    try:
+        deleted1 = await asyncio.to_thread(db.clean_old_data)
+        deleted2 = await asyncio.to_thread(db.clean_unbound_old_data)
+        await asyncio.to_thread(db.clean_db_by_size)
+        if deleted1 or deleted2:
+            print(f"🧹 清理旧数据: {deleted1 + deleted2} 条")
+    except Exception as e:
+        print(f"⚠️ 清理失败: {e}")
