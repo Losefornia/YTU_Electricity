@@ -144,7 +144,7 @@ async def fetch_all_bound():
     try:
         deleted1 = await asyncio.to_thread(db.clean_old_data)
         deleted2 = await asyncio.to_thread(db.clean_unbound_old_data)
-        await asyncio.to_thread(db.clean_db_by_size)
+       # await asyncio.to_thread(db.clean_db_by_size)
         if deleted1 or deleted2:
             print(f"🧹 清理旧数据: {deleted1 + deleted2} 条")
     except Exception as e:
