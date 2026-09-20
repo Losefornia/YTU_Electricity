@@ -11,34 +11,12 @@ from . import db
 from . import spider
 from .utils import (
     convert_dorm_format, draw_bar_chart,
-    PRICE_PER_KWH, calc_usage_with_recharge,
+    PRICE_PER_KWH, calc_14day_usage,
 )
 
-ALERT_THRESHOLD = 5      # 余额低于 5 元 → 主动发预警
-WARN_THRESHOLD = 15      # 余额低于 15 元 → /查 显示「🟠 预警」
+ALERT_THRESHOLD = 5
+WARN_THRESHOLD = 15
 FETCH_INTERVAL_MIN = 60
-
-
-def _calc_day_usage(addr, day):
-    if day.hour < 10:
-        start = (day - timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
-    else:
-        start = day.replace(hour=10, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=1)
-
-    start_str = start.strftime("%Y-%m-%d %H:%M:%S")
-    end_str = end.strftime("%Y-%m-%d %H:%M:%S")
-
-    rows = db.query_all(
-        "SELECT balance FROM meter_records WHERE user_addr=? AND record_time>=? AND record_time<? ORDER BY record_time ASC",
-        (addr, start_str, end_str),
-    )
-
-    if len(rows) < 2:
-        return None
-
-    balances = [r["balance"] for r in rows]
-    return calc_usage_with_recharge(balances)
 
 
 @register("astrbot_plugin_dianfei", "你的名字", "电费查询插件", "1.0.0", "")
@@ -51,21 +29,35 @@ class DianFeiPlugin(Star):
     async def initialize(self):
         logger.info("✅ 电管Doro 插件已加载")
         self._fetch_task = asyncio.create_task(self._fetch_loop())
+        self._fetch_task.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, task):
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.error(f"抓取任务异常退出: {exc}", exc_info=exc)
 
     async def _fetch_loop(self):
-        await asyncio.sleep(60)   # 插件加载后等 60 秒再抓第一次
+        await asyncio.sleep(60)
+        await self._safe_fetch()
+        backoff = FETCH_INTERVAL_MIN * 60
+        while True:
+            await asyncio.sleep(backoff)
+            ok = await self._safe_fetch()
+            if ok:
+                backoff = FETCH_INTERVAL_MIN * 60
+            else:
+                backoff = min(backoff * 2, 3600)
+
+    async def _safe_fetch(self):
         try:
             await spider.fetch_all_bound()
             await self._check_alerts()
+            return True
         except Exception as e:
-            logger.warning(f"启动抓取异常: {e}")
-        while True:
-            await asyncio.sleep(FETCH_INTERVAL_MIN * 60)
-            try:
-                await spider.fetch_all_bound()
-                await self._check_alerts()
-            except Exception as e:
-                logger.warning(f"定时抓取异常: {e}")
+            logger.warning(f"抓取异常: {e}")
+            return False
 
     async def _check_alerts(self):
         addrs = db.get_bound_addrs()
@@ -97,15 +89,16 @@ class DianFeiPlugin(Star):
                 f"📖 回复「忽略」可屏蔽提醒"
             )
 
-            for umo, openid in users:
+            async def _send(umo, openid, _text=text):
                 try:
                     at_tag = f'<qqbot-at-user id="{openid}" />'
-                    full_text = f"{at_tag}\n{text}"
-                    chain = MessageChain(chain=[Plain(full_text)])
+                    chain = MessageChain(chain=[Plain(f"{at_tag}\n{_text}")])
                     await self.context.send_message(umo, chain)
-                    logger.info(f"🔔 已推送预警：{addr} 余额 {balance} 元 → {openid}")
+                    logger.debug(f"🔔 已推送预警：{addr} → {openid}")
                 except Exception as e:
                     logger.warning(f"⚠️ 预警推送失败 {openid}: {e}")
+
+            await asyncio.gather(*[_send(u, o) for u, o in users])
 
     # ===== 绑定 =====
     @filter.command("绑定")
@@ -160,7 +153,7 @@ class DianFeiPlugin(Star):
         db.unbind_user(openid)
         yield at_reply(f"\n✅ 已解绑宿舍 {addr}")
 
-    # ===== 忽略预警 =====
+    # ===== 忽略 =====
     @filter.command("忽略")
     async def ignore(self, event: AstrMessageEvent):
         openid = event.get_sender_id()
@@ -205,14 +198,16 @@ class DianFeiPlugin(Star):
         display_name = name[0] + "**" if name and len(name) >= 2 else name or addr
 
         now = datetime.now()
-        today_usage = _calc_day_usage(addr, now)
-        yesterday_usage = _calc_day_usage(addr, now - timedelta(days=1))
+        # 一次查库拿 14 天
+        usage_map = calc_14day_usage(addr, now)
+        today_usage = usage_map.get(0)
+        yesterday_usage = usage_map.get(1)
 
         days_detail = []
         valid_usages = []
         for i in range(14):
             d = now - timedelta(days=i)
-            usage = _calc_day_usage(addr, d)
+            usage = usage_map.get(i)
             label = "今天" if i == 0 else f"{d.month}月{d.day}日"
             if usage is None:
                 days_detail.append(f"{label} 无数据")
@@ -291,7 +286,7 @@ class DianFeiPlugin(Star):
     @filter.command("帮助")
     async def help(self, event: AstrMessageEvent):
         yield event.plain_result(
-            "📖 电管Doro 使用指南\n"
+            "📖 使用指南\n"
             "━━━━━━━━━━━━━━━━\n"
             "📝 绑定：/绑定 NS07N0488\n"
             "⚡ 查询：/查（近14天日用电）\n"
@@ -306,4 +301,9 @@ class DianFeiPlugin(Star):
     async def terminate(self):
         if self._fetch_task:
             self._fetch_task.cancel()
+            try:
+                await self._fetch_task
+            except asyncio.CancelledError:
+                pass
+        await spider.close_client()
         logger.info("👋 电管Doro 插件已卸载")
