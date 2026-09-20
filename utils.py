@@ -1,12 +1,13 @@
+# utils.py
 import re
 from datetime import datetime, timedelta
+from collections import defaultdict
 
 PRICE_PER_KWH = 0.55
 DAY_SPLIT_HOUR = 10
 
 
 def match_key(addr):
-    """归一化地址，用于匹配学校返回的数据。"""
     if not addr:
         return ''
     a = addr.upper().replace(' ', '')
@@ -18,7 +19,6 @@ def match_key(addr):
 
 
 def convert_dorm_format(addr):
-    """把用户输入的宿舍号转成数据库存储格式。"""
     if not addr:
         return addr
     if 'BS' in addr or '北校' in addr:
@@ -88,6 +88,47 @@ def calc_usage_with_recharge(balances):
     return round(max(0, usage), 2)
 
 
+def calc_14day_usage(addr, now=None):
+    """
+    一次查库，返回 {offset_days: usage}。
+    offset_days=0 为今天（10:00 日界），1 为昨天，... 13 为第 14 天。
+    缺失的 key 不存在，调用方用 .get(i) 判断。
+    """
+    from . import db
+    now = now or datetime.now()
+
+    today_start = get_today_start(now)
+    start = today_start - timedelta(days=14)
+    start_str = start.strftime("%Y-%m-%d %H:%M:%S")
+
+    rows = db.query_all(
+        "SELECT record_time, balance FROM meter_records "
+        "WHERE user_addr=? AND record_time>=? ORDER BY record_time ASC",
+        (addr, start_str),
+    )
+    if len(rows) < 2:
+        return {}
+
+    # 按 10:00 日界分桶
+    buckets = defaultdict(list)
+    for r in rows:
+        try:
+            t = datetime.strptime(r["record_time"], "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            continue
+        day_start = t.replace(hour=DAY_SPLIT_HOUR, minute=0, second=0, microsecond=0)
+        if t.hour < DAY_SPLIT_HOUR:
+            day_start -= timedelta(days=1)
+        offset = (today_start - day_start).days
+        buckets[offset].append(r["balance"])
+
+    result = {}
+    for offset, balances in buckets.items():
+        if 0 <= offset < 14 and len(balances) >= 2:
+            result[offset] = calc_usage_with_recharge(balances)
+    return result
+
+
 def draw_bar_chart(data, max_bars=12):
     if not data:
         return "暂无数据"
@@ -103,7 +144,7 @@ def draw_bar_chart(data, max_bars=12):
         time_range = f"{date} {hour:02d}:00-{next_hour:02d}:00"
         if usage > 0:
             bar_len = max(1, min(int(usage * 0.8), 8))
-            chart.append(f"{time_range} {'█' * bar_len} {usage:.3f}度")   # ← 改这里
+            chart.append(f"{time_range} {'█' * bar_len} {usage:.3f}度")
         else:
             chart.append(f"{time_range} 无数据")
     return '\n'.join(chart) if chart else "暂无数据"
