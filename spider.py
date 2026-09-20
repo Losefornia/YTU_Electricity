@@ -1,5 +1,7 @@
+# spider.py
 import asyncio
 import re
+import time
 from datetime import datetime
 
 import httpx
@@ -15,15 +17,37 @@ HEADERS = {
 }
 REQUEST_TIMEOUT = 30
 
-# ===== 爬取节奏参数 =====
-MAX_BUFFER_SIZE = 1 * 1024 * 1024   # 缓冲区上限 1MB
-PANEL_SLEEP = 0.05                  # 每解析 10 个 panel 歇一下
-BATCH_SIZE = 20                     # 每批写库 20 条
-BATCH_SLEEP = 2                     # 每批写库之间歇 2 秒
+MAX_BUFFER_SIZE = 1 * 1024 * 1024
+PANEL_SLEEP = 0.05
+BATCH_SIZE = 100
+BATCH_SLEEP = 0.2
+
+_client = None
+
+
+def get_client():
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(
+            timeout=REQUEST_TIMEOUT,
+            headers=HEADERS,
+            limits=httpx.Limits(
+                max_connections=5,
+                max_keepalive_connections=3,
+                keepalive_expiry=60,
+            ),
+        )
+    return _client
+
+
+async def close_client():
+    global _client
+    if _client and not _client.is_closed:
+        await _client.aclose()
+    _client = None
 
 
 def parse_one_panel(panel_html: str):
-    """解析单个 weui-panel，返回一条记录。"""
     soup = BeautifulSoup(panel_html, "html.parser")
     panel = soup.find("div", class_="weui-panel")
     if not panel:
@@ -60,11 +84,14 @@ def parse_one_panel(panel_html: str):
 
 
 async def stream_and_parse(client, target_addrs):
-    """
-    流式读取 HTML，逐块找出完整的 weui-panel 并解析。
-    内存可控，适合大量宿舍。
-    """
-    target_map = {match_key(t): t for t in target_addrs}
+    target_map = {}
+    for t in target_addrs:
+        k = match_key(t)
+        if k:
+            target_map[k] = t
+    if not target_map:
+        return []
+
     records = []
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -110,6 +137,10 @@ async def stream_and_parse(client, target_addrs):
                 if total_panels % 10 == 0:
                     await asyncio.sleep(PANEL_SLEEP)
 
+            # 命中全部目标 → 提前结束，省网络 IO
+            if len(records) >= len(target_map):
+                break
+
             if len(buffer) > MAX_BUFFER_SIZE:
                 buffer = buffer[-512 * 1024:]
 
@@ -117,35 +148,58 @@ async def stream_and_parse(client, target_addrs):
     return records
 
 
+def _save_all(records):
+    """单次 to_thread 内跑完所有批次，减少线程切换。"""
+    for i in range(0, len(records), BATCH_SIZE):
+        batch = records[i:i + BATCH_SIZE]
+        db.save_records(batch)
+        time.sleep(BATCH_SLEEP)
+
+
 async def fetch_specific(addrs):
-    """抓取指定宿舍的余额，写入数据库。"""
     if not addrs:
         return
-
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT, headers=HEADERS) as client:
-        records = await stream_and_parse(client, addrs)
-
+    client = get_client()
+    records = await stream_and_parse(client, addrs)
     if records:
-        for i in range(0, len(records), BATCH_SIZE):
-            batch = records[i:i + BATCH_SIZE]
-            await asyncio.to_thread(db.save_records, batch)
-            await asyncio.sleep(BATCH_SLEEP)
+        await asyncio.to_thread(_save_all, records)
         print(f"✅ 入库 {len(records)} 条")
 
 
+def _should_clean():
+    """检查是否到了清理周期（持久化，重启不重置）。"""
+    last = db.get_meta("last_clean_date")
+    today = datetime.now().date()
+
+    if last is not None:
+        try:
+            last_date = datetime.strptime(last, "%Y-%m-%d").date()
+            if (today - last_date).days < db.CLEAN_DAYS:
+                return False
+        except (ValueError, TypeError):
+            pass
+
+    # 只在凌晨 3:00 后清，避开用户活跃时段
+    if datetime.now().hour < 3:
+        return False
+
+    return True
+
+
 async def fetch_all_bound():
-    """抓取所有已绑定宿舍的余额。"""
     addrs = db.get_bound_addrs()
     if not addrs:
         return
     await fetch_specific(addrs)
 
-    # 清理旧数据（放线程池，不阻塞事件循环）
+    # 清理：每 CLEAN_DAYS 天一次，持久化记录
+    if not _should_clean():
+        return
+
     try:
-        deleted1 = await asyncio.to_thread(db.clean_old_data)
-        deleted2 = await asyncio.to_thread(db.clean_unbound_old_data)
-       # await asyncio.to_thread(db.clean_db_by_size)
-        if deleted1 or deleted2:
-            print(f"🧹 清理旧数据: {deleted1 + deleted2} 条")
+        deleted = await asyncio.to_thread(db.maintenance)
+        db.set_meta("last_clean_date", datetime.now().strftime("%Y-%m-%d"))
+        if deleted:
+            print(f"🧹 清理 {deleted} 条")
     except Exception as e:
         print(f"⚠️ 清理失败: {e}")
