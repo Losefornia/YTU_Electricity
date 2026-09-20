@@ -1,6 +1,7 @@
 # db.py
 import sqlite3
 import os
+import threading
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -12,17 +13,36 @@ except Exception:
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "meters_data.db"
 
-KEEP_DAYS = 15
-MAX_DB_SIZE_MB = 50
-KEEP_RECORDS = 2000
+KEEP_DAYS = 16        # 保留 16 天（14天查询 + 10:00 日界余量）
+CLEAN_DAYS = 7        # 每 7 天清一次
+
+_local = threading.local()
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH, timeout=20)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.row_factory = sqlite3.Row
+    """线程本地常驻连接，只建一次。"""
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        conn = sqlite3.connect(DB_PATH, timeout=20)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        conn.execute("PRAGMA cache_size=-8000;")      # 8MB
+        conn.execute("PRAGMA temp_store=MEMORY;")
+        conn.row_factory = sqlite3.Row
+        _local.conn = conn
     return conn
+
+
+def close_db():
+    """线程退出时调用，关闭当前线程的连接。"""
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        _local.conn = None
 
 
 def init_tables():
@@ -37,15 +57,18 @@ def init_tables():
             balance REAL
         )
     """)
-    # 唯一索引：同时间同地址不重复插
     conn.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_record
         ON meter_records (record_time, user_addr)
     """)
-    # 查询索引
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_addr_time
         ON meter_records (user_addr, record_time)
+    """)
+    # 清理专用：纯时间索引
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_time
+        ON meter_records (record_time)
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS user_bind (
@@ -55,10 +78,22 @@ def init_tables():
             umo TEXT
         )
     """)
+    # 清理 unbound 时的 join 加速
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_bind_addr
+        ON user_bind (user_addr)
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS alert_ignore (
             user_addr TEXT PRIMARY KEY,
             ignore_since TEXT
+        )
+    """)
+    # 元数据表：持久化清理日期等
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
         )
     """)
     try:
@@ -66,29 +101,34 @@ def init_tables():
     except Exception:
         pass
     conn.commit()
-    conn.close()
 
 
 def query_one(sql, params=None):
-    conn = get_db()
-    row = conn.execute(sql, params or ()).fetchone()
-    conn.close()
-    return row
+    return get_db().execute(sql, params or ()).fetchone()
 
 
 def query_all(sql, params=None):
-    conn = get_db()
-    rows = conn.execute(sql, params or ()).fetchall()
-    conn.close()
-    return rows
+    return get_db().execute(sql, params or ()).fetchall()
 
 
 def execute(sql, params=None):
     conn = get_db()
     conn.execute(sql, params or ())
     conn.commit()
-    conn.close()
 
+
+# ===== 元数据 =====
+
+def get_meta(key):
+    row = query_one("SELECT value FROM meta WHERE key=?", (key,))
+    return row["value"] if row else None
+
+
+def set_meta(key, value):
+    execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+
+
+# ===== 绑定相关 =====
 
 def get_bind_addr(openid):
     row = query_one("SELECT user_addr FROM user_bind WHERE openid=?", (openid,))
@@ -118,6 +158,8 @@ def bind_user(openid, addr, umo=None):
 def unbind_user(openid):
     execute("DELETE FROM user_bind WHERE openid=?", (openid,))
 
+
+# ===== 余额 / 历史 =====
 
 def get_user_balance(addr):
     return query_one(
@@ -153,27 +195,32 @@ def get_hourly_usage(addr, hours=24):
         if diff <= 0:
             continue
 
-        hours_span = max(1, int((curr_time - prev_time).total_seconds() / 3600))
-        for h in range(hours_span):
-            t = prev_time + timedelta(hours=h)
-            key = t.strftime("%m-%d %H:00")
-            hourly_data[key] = hourly_data.get(key, 0) + (diff / PRICE_PER_KWH / hours_span)
+        # 间隔 >2 小时视为数据断层，不摊到小时图，避免虚高
+        hours_span = (curr_time - prev_time).total_seconds() / 3600
+        if hours_span > 2:
+            continue
+
+        key = prev_time.strftime("%m-%d %H:00")
+        hourly_data[key] = hourly_data.get(key, 0) + (diff / PRICE_PER_KWH)
 
     return hourly_data
 
 
+# ===== 批量写 =====
+
 def save_records(records):
-    """批量写入，同时间同地址自动去重。"""
+    """批量写入，显式事务，同时间同地址自动去重。"""
     if not records:
         return
     conn = get_db()
+    conn.execute("BEGIN")
     conn.executemany(
-        "INSERT OR IGNORE INTO meter_records (record_time, user_no, user_name, user_addr, balance) "
+        "INSERT OR IGNORE INTO meter_records "
+        "(record_time, user_no, user_name, user_addr, balance) "
         "VALUES (?, ?, ?, ?, ?)",
         records,
     )
-    conn.commit()
-    conn.close()
+    conn.execute("COMMIT")
 
 
 def get_bound_addrs():
@@ -181,67 +228,36 @@ def get_bound_addrs():
     return [r["user_addr"] for r in rows]
 
 
+# ===== 清理（低频，独立协程调用） =====
+
 def clean_old_data():
-    cutoff = (datetime.now() - timedelta(days=KEEP_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
+    """按 10:00 日界对齐，删除 KEEP_DAYS 天前的数据。"""
+    from .utils import get_today_start
+    cutoff = (get_today_start() - timedelta(days=KEEP_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
     conn = get_db()
     cursor = conn.execute("DELETE FROM meter_records WHERE record_time < ?", (cutoff,))
     deleted = cursor.rowcount
     conn.commit()
-    conn.close()
     return deleted
 
 
-def clean_unbound_old_data():
-    """删除已解绑宿舍的旧数据。如果没有任何绑定，直接返回，避免误删全表。"""
+def maybe_checkpoint():
+    """回收 WAL，只在清理后调用。"""
     conn = get_db()
-    bound_count = conn.execute("SELECT COUNT(*) FROM user_bind").fetchone()[0]
-    if bound_count == 0:
-        conn.close()
-        return 0
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+    except Exception:
+        pass
 
-    cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-    cursor = conn.execute("""
-        DELETE FROM meter_records 
-        WHERE user_addr NOT IN (SELECT user_addr FROM user_bind)
-        AND record_time < ?
-    """, (cutoff,))
-    deleted = cursor.rowcount
-    conn.commit()
-    conn.close()
+
+def maintenance():
+    """一次 to_thread 内跑完清理 + checkpoint。"""
+    deleted = clean_old_data()
+    maybe_checkpoint()
     return deleted
 
 
-def clean_db_by_size():
-    """数据库超过阈值时，一次性删到 KEEP_RECORDS 条。不分批、不循环、不 sleep。"""
-    if not os.path.exists(DB_PATH):
-        return
-    db_size = os.path.getsize(DB_PATH) / (1024 * 1024)
-    if db_size <= MAX_DB_SIZE_MB:
-        return
-
-    conn = get_db()
-    total = conn.execute("SELECT COUNT(*) FROM meter_records").fetchone()[0]
-    if total <= KEEP_RECORDS:
-        conn.close()
-        return
-
-    row = conn.execute(
-        "SELECT id FROM meter_records ORDER BY id DESC LIMIT 1 OFFSET ?",
-        (KEEP_RECORDS,),
-    ).fetchone()
-    if not row:
-        conn.close()
-        return
-    cutoff_id = row[0]
-
-    cursor = conn.execute("DELETE FROM meter_records WHERE id < ?", (cutoff_id,))
-    deleted = cursor.rowcount
-    conn.commit()
-    conn.close()
-    print(f"🧹 按大小清理完成，删除 {deleted} 条")
-
-
-# ===== 忽略预警相关 =====
+# ===== 忽略预警 =====
 
 def set_ignore(addr):
     execute(
