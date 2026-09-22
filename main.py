@@ -18,6 +18,17 @@ ALERT_THRESHOLD = 5
 WARN_THRESHOLD = 15
 FETCH_INTERVAL_MIN = 60
 
+# ===== 允许使用的群聊白名单 =====
+ALLOWED_GROUPS = [
+    "default_1905605993:GroupMessage:8136D3D9580E7AD9FB0B516C4E5FDDF1",
+]
+
+
+def is_allowed(event: AstrMessageEvent) -> bool:
+    if not ALLOWED_GROUPS:
+        return True
+    return event.unified_msg_origin in ALLOWED_GROUPS
+
 
 @register("astrbot_plugin_dianfei", "你的名字", "电费查询插件", "1.0.0", "")
 class DianFeiPlugin(Star):
@@ -90,6 +101,8 @@ class DianFeiPlugin(Star):
             )
 
             async def _send(umo, openid, _text=text):
+                if ALLOWED_GROUPS and umo not in ALLOWED_GROUPS:
+                    return
                 try:
                     at_tag = f'<qqbot-at-user id="{openid}" />'
                     chain = MessageChain(chain=[Plain(f"{at_tag}\n{_text}")])
@@ -103,6 +116,8 @@ class DianFeiPlugin(Star):
     # ===== 绑定 =====
     @filter.command("绑定")
     async def bind(self, event: AstrMessageEvent):
+        if not is_allowed(event):
+            return
         openid = event.get_sender_id()
         umo = event.unified_msg_origin
         parts = event.message_str.split()
@@ -140,6 +155,8 @@ class DianFeiPlugin(Star):
     # ===== 解绑 =====
     @filter.command("解绑")
     async def unbind(self, event: AstrMessageEvent):
+        if not is_allowed(event):
+            return
         openid = event.get_sender_id()
         addr = db.get_bind_addr(openid)
 
@@ -156,6 +173,8 @@ class DianFeiPlugin(Star):
     # ===== 忽略 =====
     @filter.command("忽略")
     async def ignore(self, event: AstrMessageEvent):
+        if not is_allowed(event):
+            return
         openid = event.get_sender_id()
         addr = db.get_bind_addr(openid)
 
@@ -176,6 +195,8 @@ class DianFeiPlugin(Star):
     # ===== 查询 =====
     @filter.command("查")
     async def query(self, event: AstrMessageEvent):
+        if not is_allowed(event):
+            return
         openid = event.get_sender_id()
         addr = db.get_bind_addr(openid)
 
@@ -198,7 +219,6 @@ class DianFeiPlugin(Star):
         display_name = name[0] + "**" if name and len(name) >= 2 else name or addr
 
         now = datetime.now()
-        # 一次查库拿 14 天
         usage_map = calc_14day_usage(addr, now)
         today_usage = usage_map.get(0)
         yesterday_usage = usage_map.get(1)
@@ -253,6 +273,8 @@ class DianFeiPlugin(Star):
     # ===== 详情 =====
     @filter.command("详情")
     async def detail(self, event: AstrMessageEvent):
+        if not is_allowed(event):
+            return
         openid = event.get_sender_id()
         addr = db.get_bind_addr(openid)
 
@@ -285,6 +307,8 @@ class DianFeiPlugin(Star):
     # ===== 帮助 =====
     @filter.command("帮助")
     async def help(self, event: AstrMessageEvent):
+        if not is_allowed(event):
+            return
         yield event.plain_result(
             "📖 使用指南\n"
             "━━━━━━━━━━━━━━━━\n"
