@@ -2,46 +2,10 @@
 import re
 from datetime import datetime, timedelta
 from collections import defaultdict
-from io import BytesIO
 
 PRICE_PER_KWH = 0.55
 DAY_SPLIT_HOUR = 10
 
-
-# ========= 字体延迟配置（只做一次） =========
-_FONT_READY = False
-
-
-def _setup_font():
-    """首次绘图时初始化 matplotlib 和中文字体。"""
-    global _FONT_READY
-    if _FONT_READY:
-        return
-
-    import matplotlib
-    matplotlib.use("Agg")  # 无 GUI 后端，服务器必须
-    from matplotlib import font_manager
-    import matplotlib.pyplot as plt
-
-    # 按优先级找系统中文字体
-    candidates = [
-        "WenQuanYi Zen Hei",
-        "WenQuanYi Micro Hei",
-        "Noto Sans CJK SC",
-        "Noto Sans SC",
-        "Source Han Sans SC",
-        "Microsoft YaHei",
-        "SimHei",
-    ]
-    installed = {f.name for f in font_manager.fontManager.ttflist}
-    chosen = next((c for c in candidates if c in installed), None)
-    if chosen:
-        plt.rcParams["font.sans-serif"] = [chosen]
-    plt.rcParams["axes.unicode_minus"] = False
-    _FONT_READY = True
-
-
-# ========= 地址处理 =========
 
 def match_key(addr):
     if not addr:
@@ -67,6 +31,7 @@ def convert_dorm_format(addr):
                 return f"{campus}{building}{section}-{room}"
             return f"{campus}{building}楼{section}{room}"
         return f"{campus}{addr}"
+
     campus = '南校'
     if 'NS' in addr or '南校' in addr:
         addr = addr.replace('NS', '').replace('南校', '')
@@ -75,8 +40,6 @@ def convert_dorm_format(addr):
         addr = f"{match.group(1)}{match.group(2)}-{match.group(3)}"
     return f"{campus}{addr}"
 
-
-# ========= 时间边界 =========
 
 def get_day_boundary(dt, offset_days=0):
     target = dt + timedelta(days=offset_days)
@@ -111,8 +74,6 @@ def get_yesterday_end(now=None):
     return get_day_boundary(now, 0)
 
 
-# ========= 用量计算 =========
-
 def calc_usage_with_recharge(balances):
     if len(balances) < 2:
         return 0.0
@@ -131,12 +92,15 @@ def calc_14day_usage(addr, now=None):
     """
     一次查库，返回 {offset_days: usage}。
     offset_days=0 为今天（10:00 日界），1 为昨天，... 13 为第 14 天。
+    缺失的 key 不存在，调用方用 .get(i) 判断。
     """
     from . import db
     now = now or datetime.now()
+
     today_start = get_today_start(now)
     start = today_start - timedelta(days=14)
     start_str = start.strftime("%Y-%m-%d %H:%M:%S")
+
     rows = db.query_all(
         "SELECT record_time, balance FROM meter_records "
         "WHERE user_addr=? AND record_time>=? ORDER BY record_time ASC",
@@ -144,6 +108,8 @@ def calc_14day_usage(addr, now=None):
     )
     if len(rows) < 2:
         return {}
+
+    # 按 10:00 日界分桶
     buckets = defaultdict(list)
     for r in rows:
         try:
@@ -155,6 +121,7 @@ def calc_14day_usage(addr, now=None):
             day_start -= timedelta(days=1)
         offset = (today_start - day_start).days
         buckets[offset].append(r["balance"])
+
     result = {}
     for offset, balances in buckets.items():
         if 0 <= offset < 14 and len(balances) >= 2:
@@ -162,62 +129,22 @@ def calc_14day_usage(addr, now=None):
     return result
 
 
-# ========= 绘图 =========
-
-def draw_bar_chart(data, addr=""):
-    """
-    data: {offset: usage}，来自 calc_14day_usage
-    addr: 宿舍地址（用于标题）
-    返回 BytesIO(PNG)，失败返回 None
-    """
+def draw_bar_chart(data, max_bars=12):
     if not data:
-        return None
-
-    _setup_font()  # 延迟初始化 matplotlib + 字体
-    import matplotlib.pyplot as plt
-
-    sorted_items = sorted(data.items(), key=lambda x: x[0])
-    date_text, week_text, usage_data = [], [], []
-
-    now = datetime.now()
-    today_start = get_today_start(now)
-    for offset, usage_val in sorted_items:
-        day_dt = today_start - timedelta(days=offset)
-        date_text.append(f"{day_dt.month:02d}-{day_dt.day:02d}")
-        week_text.append(["周一", "周二", "周三", "周四", "周五", "周六", "周日"][day_dt.weekday()])
-        usage_data.append(usage_val)
-
-    xtick_labels = [f"{d}\n{w}" for d, w in zip(date_text, week_text)]
-    x = list(range(len(date_text)))
-
-    fig, ax = plt.subplots(figsize=(9, 5), dpi=150)
-    bars = ax.bar(x, usage_data, color="#87CEEB", alpha=0.7, width=0.5, label="日用电量")
-    ax.plot(x, usage_data, marker="o", color="#2E86AB", linewidth=2, markersize=4, label="趋势线")
-
-    for bar, val in zip(bars, usage_data):
-        height = bar.get_height()
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            height + 0.22,
-            f"{val}",
-            ha="center",
-            va="bottom",
-            fontsize=7,
-            color="#c82423",
-        )
-
-    title_addr = convert_dorm_format(addr) if addr else "宿舍"
-    ax.set_title(f"{title_addr} 近14天用电量统计（单位：度）", fontsize=10)
-    ax.set_xlabel("日期")
-    ax.set_ylabel("用电量(度)")
-    ax.set_xticks(x)
-    ax.set_xticklabels(xtick_labels, fontsize=7)
-    ax.legend(fontsize=7)
-    ax.grid(axis="y", alpha=0.3)
-
-    buf = BytesIO()
-    plt.tight_layout()
-    plt.savefig(buf, format="png", bbox_inches="tight")
-    buf.seek(0)
-    plt.close(fig)
-    return buf
+        return "暂无数据"
+    items = list(data.items())[-max_bars:]
+    chart = []
+    for time_key, usage in items:
+        parts = time_key.split()
+        if len(parts) < 2:
+            continue
+        date = parts[0]
+        hour = int(parts[1].split(':')[0])
+        next_hour = (hour + 1) % 24
+        time_range = f"{date} {hour:02d}:00-{next_hour:02d}:00"
+        if usage > 0:
+            bar_len = max(1, min(int(usage * 0.8), 8))
+            chart.append(f"{time_range} {'█' * bar_len} {usage:.3f}度")
+        else:
+            chart.append(f"{time_range} 无数据")
+    return '\n'.join(chart) if chart else "暂无数据"
