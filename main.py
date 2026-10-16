@@ -3,14 +3,13 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
-import re
 import asyncio
 from datetime import datetime, timedelta
 
 from . import db
 from . import spider
 from .utils import (
-    convert_dorm_format, draw_bar_chart,
+    convert_dorm_format,
     PRICE_PER_KWH, calc_14day_usage,
 )
 
@@ -18,7 +17,7 @@ ALERT_THRESHOLD = 5
 WARN_THRESHOLD = 15
 FETCH_INTERVAL_MIN = 60
 
-# ===== 允许使用的群聊白名单（已修正第二个群ID） =====
+# ===== 允许使用的群聊白名单 =====
 ALLOWED_GROUPS = [
     "default_1905605993:GroupMessage:8136D3D9580E7AD9FB0B516C4E5FDF1",
     "default_1905605993:GroupMessage:E13B720565366E510BCBCA5E16BA84E0",
@@ -27,6 +26,14 @@ ALLOWED_GROUPS = [
 
 def is_allowed(event: AstrMessageEvent):
     return event.unified_id in ALLOWED_GROUPS
+
+
+def get_today_start(now: datetime) -> datetime:
+    """以每天 10:00 为分界。未到 10 点算前一天。"""
+    t = now.replace(hour=10, minute=0, second=0, microsecond=0)
+    if now < t:
+        t -= timedelta(days=1)
+    return t
 
 
 @register("YTU_Electricity", "YTU电费", "烟大电费查询插件", "1.0.0")
@@ -106,9 +113,9 @@ class DianFeiPlugin(Star):
         usage_list = list(recs_14.values())
         today_use = usage_list[-1]
         yesterday_use = usage_list[-2]
-        avg_use = round(sum(usage_list)/len(usage_list),3)
-        avg_cost = round(avg_use * PRICE_PER_KWH,2)
-        day_left = round(balance / avg_cost,0) if avg_cost>0 else 0
+        avg_use = round(sum(usage_list) / len(usage_list), 3)
+        avg_cost = round(avg_use * PRICE_PER_KWH, 2)
+        day_left = round(balance / avg_cost, 0) if avg_cost > 0 else 0
 
         if balance >= WARN_THRESHOLD:
             status = "🟢 正常"
@@ -128,13 +135,13 @@ class DianFeiPlugin(Star):
 📅 预计可用：约 {day_left:.0f} 天
 ━━━━━━━━━━━━━━━━
 📊 近14天每日用电（10:00-次日10:00）："""
-        sorted_items = sorted(recs_14.items(), key=lambda x:x[0])
+        sorted_items = sorted(recs_14.items(), key=lambda x: x[0])
         now = datetime.now()
         today_start = get_today_start(now)
         for offset, u in sorted_items:
             day_dt = today_start - timedelta(days=offset)
             d_str = f"{day_dt.month:02d}-{day_dt.day:02d}"
-            cost = round(u * PRICE_PER_KWH,2)
+            cost = round(u * PRICE_PER_KWH, 2)
             text += f"\n{d_str} █ {u:.3f}度（{cost}元）"
         text += "\n━━━━━━━━━━━━━━━━"
         return text
@@ -169,6 +176,18 @@ class DianFeiPlugin(Star):
         if not addr:
             yield event.plain_result("❌ 请先使用 /绑定宿舍 绑定宿舍")
             return
+
+        # 延迟导入绘图函数，避免缺 matplotlib 时整个插件加载失败
+        try:
+            from .utils import draw_bar_chart
+        except Exception as e:
+            logger.error(f"[电费] 导入绘图模块失败: {e}")
+            yield event.plain_result(
+                f"❌ 绘图依赖未安装（{e}）。\n"
+                f"请在 AstrBot 所在环境执行：pip install matplotlib"
+            )
+            return
+
         try:
             data_14 = calc_14day_usage(addr)
             if not data_14:
@@ -179,5 +198,5 @@ class DianFeiPlugin(Star):
             yield event.plain_result(text_report)
             yield event.image_result(img_buf.getvalue())
         except Exception as e:
-            logger.error(f"绘图异常: {e}")
+            logger.error(f"[电费] 绘图异常: {e}", exc_info=e)
             yield event.plain_result(f"❌ 绘图失败：{str(e)}")
