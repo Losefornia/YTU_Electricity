@@ -3,13 +3,14 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
+import re
 import asyncio
 from datetime import datetime, timedelta
 
 from . import db
 from . import spider
 from .utils import (
-    convert_dorm_format,
+    convert_dorm_format, draw_bar_chart,
     PRICE_PER_KWH, calc_14day_usage,
 )
 
@@ -19,184 +20,315 @@ FETCH_INTERVAL_MIN = 60
 
 # ===== 允许使用的群聊白名单 =====
 ALLOWED_GROUPS = [
-    "default_1905605993:GroupMessage:8136D3D9580E7AD9FB0B516C4E5FDF1",
+    "default_1905605993:GroupMessage:8136D3D9580E7AD9FB0B516C4E5FDDF1",
     "default_1905605993:GroupMessage:E13B720565366E510BCBCA5E16BA84E0",
 ]
 
 
-def is_allowed(event: AstrMessageEvent):
-    return event.unified_id in ALLOWED_GROUPS
+def is_allowed(event: AstrMessageEvent) -> bool:
+    if not ALLOWED_GROUPS:
+        return True
+    return event.unified_msg_origin in ALLOWED_GROUPS
 
 
-def get_today_start(now: datetime) -> datetime:
-    """以每天 10:00 为分界。未到 10 点算前一天。"""
-    t = now.replace(hour=10, minute=0, second=0, microsecond=0)
-    if now < t:
-        t -= timedelta(days=1)
-    return t
-
-
-@register("YTU_Electricity", "YTU电费", "烟大电费查询插件", "1.0.0")
+@register("astrbot_plugin_dianfei", "你的名字", "电费查询插件", "1.0.0", "")
 class DianFeiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
-        self.addr_map = {}
+        db.init_tables()
         self._fetch_task = None
 
     async def initialize(self):
+        logger.info("✅ 电管Doro 插件已加载")
         self._fetch_task = asyncio.create_task(self._fetch_loop())
+        self._fetch_task.add_done_callback(self._on_task_done)
 
-    async def _on_task_done(self, task):
-        try:
-            await task
-        except Exception as e:
-            logger.error(f"抓取任务异常: {e}")
+    def _on_task_done(self, task):
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.error(f"抓取任务异常退出: {exc}", exc_info=exc)
 
     async def _fetch_loop(self):
+        await asyncio.sleep(60)
+        await self._safe_fetch()
+        backoff = FETCH_INTERVAL_MIN * 60
         while True:
-            await asyncio.sleep(FETCH_INTERVAL_MIN * 60)
-            try:
-                await self._safe_fetch()
-            except Exception as e:
-                logger.error(f"定时抓取失败: {e}")
+            await asyncio.sleep(backoff)
+            ok = await self._safe_fetch()
+            if ok:
+                backoff = FETCH_INTERVAL_MIN * 60
+            else:
+                backoff = min(backoff * 2, 3600)
 
     async def _safe_fetch(self):
-        all_addrs = db.get_all_addr()
-        for addr in all_addrs:
-            try:
-                balance = await spider.fetch_balance(addr)
-                if balance is not None:
-                    db.insert_record(addr, balance)
-                    await self._check_alerts(addr, balance)
-            except Exception as e:
-                logger.warning(f"抓取 {addr} 失败 {e}")
-
-    async def _check_alerts(self, addr, balance):
-        last_alert = db.get_last_alert(addr)
-        if balance <= ALERT_THRESHOLD:
-            if last_alert != "alert":
-                await self._send_alert(addr, balance, "alert")
-                db.set_last_alert(addr, "alert")
-        elif balance <= WARN_THRESHOLD:
-            if last_alert != "warn":
-                await self._send_alert(addr, balance, "warn")
-                db.set_last_alert(addr, "warn")
-        else:
-            db.set_last_alert(addr, "ok")
-
-    async def _send_alert(self, addr, balance, level):
-        name = convert_dorm_format(addr)
-        if level == "alert":
-            msg = f"【⚠️电费紧急提醒】{name} 余额不足！当前余额：{balance:.2f}元，请尽快充值！"
-        else:
-            msg = f"【💡电费预警】{name} 电费即将不足，当前余额：{balance:.2f}元，留意用电。"
-        for gid in ALLOWED_GROUPS:
-            await self.context.send_message(gid, MessageChain([Plain(msg)]))
-
-    def get_addr(self, event: AstrMessageEvent):
-        uid = event.unified_id
-        return self.addr_map.get(uid)
-
-    def get_electric_text(self, addr):
-        recs_14 = calc_14day_usage(addr)
-        balance = db.get_latest_balance(addr)
-        if balance is None:
-            return "❌ 暂无该宿舍电费数据"
-
-        if not recs_14 or len(recs_14) < 2:
-            return f"""🏠 {convert_dorm_format(addr)}
-💰 余额：{balance:.2f} 元
-📊 状态：{"🟢正常" if balance >= WARN_THRESHOLD else "🟡预警" if balance >= ALERT_THRESHOLD else "🔴欠费"}
-━━━━━━━━━━━━━━━━
-⚠️ 近14天数据不足，无法计算日均用电"""
-
-        usage_list = list(recs_14.values())
-        today_use = usage_list[-1]
-        yesterday_use = usage_list[-2]
-        avg_use = round(sum(usage_list) / len(usage_list), 3)
-        avg_cost = round(avg_use * PRICE_PER_KWH, 2)
-        day_left = round(balance / avg_cost, 0) if avg_cost > 0 else 0
-
-        if balance >= WARN_THRESHOLD:
-            status = "🟢 正常"
-        elif balance >= ALERT_THRESHOLD:
-            status = "🟡 预警"
-        else:
-            status = "🔴 欠费"
-
-        text = f"""🏠 {convert_dorm_format(addr)}
-💰 余额：{balance:.2f} 元
-📊 状态：{status}
-━━━━━━━━━━━━━━━━
-⚡ 今日用电：{today_use:.3f} 度
-⚡ 昨日用电：{yesterday_use:.3f} 度
-📊 近14天日均：{avg_use:.3f} 度/天
-💰 日均电费：{avg_cost} 元/天
-📅 预计可用：约 {day_left:.0f} 天
-━━━━━━━━━━━━━━━━
-📊 近14天每日用电（10:00-次日10:00）："""
-        sorted_items = sorted(recs_14.items(), key=lambda x: x[0])
-        now = datetime.now()
-        today_start = get_today_start(now)
-        for offset, u in sorted_items:
-            day_dt = today_start - timedelta(days=offset)
-            d_str = f"{day_dt.month:02d}-{day_dt.day:02d}"
-            cost = round(u * PRICE_PER_KWH, 2)
-            text += f"\n{d_str} █ {u:.3f}度（{cost}元）"
-        text += "\n━━━━━━━━━━━━━━━━"
-        return text
-
-    @filter.command("绑定宿舍")
-    async def bind_dorm(self, event: AstrMessageEvent, dorm_addr):
-        if not is_allowed(event):
-            yield event.plain_result("无权使用")
-            return
-        addr_key = convert_dorm_format(dorm_addr)
-        self.addr_map[event.unified_id] = addr_key
-        yield event.plain_result(f"✅ 已绑定宿舍：{addr_key}")
-
-    @filter.command("电费")
-    async def query_electric(self, event: AstrMessageEvent):
-        if not is_allowed(event):
-            yield event.plain_result("无权使用")
-            return
-        addr = self.get_addr(event)
-        if not addr:
-            yield event.plain_result("❌ 请先使用 /绑定宿舍 绑定宿舍")
-            return
-        text = self.get_electric_text(addr)
-        yield event.plain_result(text)
-
-    @filter.command("电费图")
-    async def cmd_electric_img(self, event: AstrMessageEvent):
-        if not is_allowed(event):
-            yield event.plain_result("无权使用")
-            return
-        addr = self.get_addr(event)
-        if not addr:
-            yield event.plain_result("❌ 请先使用 /绑定宿舍 绑定宿舍")
-            return
-
-        # 延迟导入绘图函数，避免缺 matplotlib 时整个插件加载失败
         try:
-            from .utils import draw_bar_chart
+            await spider.fetch_all_bound()
+            await self._check_alerts()
+            return True
         except Exception as e:
-            logger.error(f"[电费] 导入绘图模块失败: {e}")
-            yield event.plain_result(
-                f"❌ 绘图依赖未安装（{e}）。\n"
-                f"请在 AstrBot 所在环境执行：pip install matplotlib"
+            logger.warning(f"抓取异常: {e}")
+            return False
+
+    async def _check_alerts(self):
+        addrs = db.get_bound_addrs()
+        for addr in addrs:
+            result = db.get_user_balance(addr)
+            if not result:
+                continue
+
+            balance = result["balance"]
+
+            if balance >= ALERT_THRESHOLD:
+                if db.is_ignored(addr):
+                    db.remove_ignore(addr)
+                    logger.info(f"✅ {addr} 余额回升，自动解除忽略")
+                continue
+
+            if db.is_ignored(addr):
+                continue
+
+            users = db.get_bind_umos_and_openids(addr)
+            if not users:
+                continue
+
+            text = (
+                f"\n⚠️ 余额不足提醒\n"
+                f"🏠 宿舍：{addr}\n"
+                f"💰 余额：{balance} 元\n"
+                f"💡 低于 {ALERT_THRESHOLD} 元，请及时充值！\n"
+                f"📖 回复「忽略」可屏蔽提醒"
+            )
+
+            async def _send(umo, openid, _text=text):
+                if ALLOWED_GROUPS and umo not in ALLOWED_GROUPS:
+                    return
+                try:
+                    at_tag = f'<qqbot-at-user id="{openid}" />'
+                    chain = MessageChain(chain=[Plain(f"{at_tag}\n{_text}")])
+                    await self.context.send_message(umo, chain)
+                    logger.debug(f"🔔 已推送预警：{addr} → {openid}")
+                except Exception as e:
+                    logger.warning(f"⚠️ 预警推送失败 {openid}: {e}")
+
+            await asyncio.gather(*[_send(u, o) for u, o in users])
+
+    # ===== 绑定 =====
+    @filter.command("绑定")
+    async def bind(self, event: AstrMessageEvent):
+        if not is_allowed(event):
+            return
+        openid = event.get_sender_id()
+        umo = event.unified_msg_origin
+        parts = event.message_str.split()
+
+        def at_reply(text):
+            at_tag = f'<qqbot-at-user id="{openid}" />'
+            return event.chain_result([Plain(f"{at_tag}\n{text}")])
+
+        if len(parts) < 2:
+            yield at_reply("\n📖 格式：绑定 宿舍号\n示例：绑定 NS07N0488")
+            return
+
+        addr_raw = parts[1].upper()
+        if not re.match(r'^(NS|BS)\d{2}[A-Z]\d{4}$', addr_raw):
+            yield at_reply(
+                f"\n❌ 宿舍号格式错误：{addr_raw}\n"
+                "💡 正确格式：NS07N0488（9位）\n"
+                "💡 NS=南校，BS=北校"
             )
             return
 
+        if db.get_bind_addr(openid):
+            yield at_reply("\n❌ 你已经绑定过了，先发「解绑」")
+            return
+
+        db_addr = convert_dorm_format(addr_raw)
+        db.bind_user(openid, db_addr, umo)
+        yield at_reply(f"\n✅ 绑定成功\n🏠 宿舍：{db_addr}\n💡 发送「查」查询电量")
+
         try:
-            data_14 = calc_14day_usage(addr)
-            if not data_14:
-                yield event.plain_result("❌ 14天用电数据不足，无法绘图")
-                return
-            img_buf = draw_bar_chart(data_14)
-            text_report = self.get_electric_text(addr)
-            yield event.plain_result(text_report)
-            yield event.image_result(img_buf.getvalue())
+            await spider.fetch_specific([db_addr])
         except Exception as e:
-            logger.error(f"[电费] 绘图异常: {e}", exc_info=e)
-            yield event.plain_result(f"❌ 绘图失败：{str(e)}")
+            logger.warning(f"绑定后抓取失败: {e}")
+
+    # ===== 解绑 =====
+    @filter.command("解绑")
+    async def unbind(self, event: AstrMessageEvent):
+        if not is_allowed(event):
+            return
+        openid = event.get_sender_id()
+        addr = db.get_bind_addr(openid)
+
+        def at_reply(text):
+            at_tag = f'<qqbot-at-user id="{openid}" />'
+            return event.chain_result([Plain(f"{at_tag}\n{text}")])
+
+        if not addr:
+            yield at_reply("\n❌ 你还没有绑定宿舍")
+            return
+        db.unbind_user(openid)
+        yield at_reply(f"\n✅ 已解绑宿舍 {addr}")
+
+    # ===== 忽略 =====
+    @filter.command("忽略")
+    async def ignore(self, event: AstrMessageEvent):
+        if not is_allowed(event):
+            return
+        openid = event.get_sender_id()
+        addr = db.get_bind_addr(openid)
+
+        def at_reply(text):
+            at_tag = f'<qqbot-at-user id="{openid}" />'
+            return event.chain_result([Plain(f"{at_tag}\n{text}")])
+
+        if not addr:
+            yield at_reply("\n❌ 你还没有绑定宿舍")
+            return
+
+        db.set_ignore(addr)
+        yield at_reply(
+            f"\n✅ 已屏蔽宿舍 {addr} 的低余额提醒\n"
+            f"💡 当余额回升至 {ALERT_THRESHOLD} 元以上时自动恢复"
+        )
+
+    # ===== 查询 =====
+    @filter.command("查")
+    async def query(self, event: AstrMessageEvent):
+        if not is_allowed(event):
+            return
+        openid = event.get_sender_id()
+        addr = db.get_bind_addr(openid)
+
+        def at_reply(text):
+            at_tag = f'<qqbot-at-user id="{openid}" />'
+            return event.chain_result([Plain(f"{at_tag}\n{text}")])
+
+        if not addr:
+            yield at_reply("\n❌ 你还没有绑定宿舍，请发送「绑定 宿舍号」")
+            return
+
+        result = db.get_user_balance(addr)
+        if not result:
+            yield at_reply(f"\n❌ 暂无数据，请等待爬虫采集\n🏠 宿舍：{addr}")
+            return
+
+        name = result["user_name"]
+        balance = result["balance"]
+        record_time = result["record_time"]
+        display_name = name[0] + "**" if name and len(name) >= 2 else name or addr
+
+        now = datetime.now()
+        usage_map = calc_14day_usage(addr, now)
+        today_usage = usage_map.get(0)
+        yesterday_usage = usage_map.get(1)
+
+        days_detail = []
+        valid_usages = []
+        for i in range(14):
+            d = now - timedelta(days=i)
+            usage = usage_map.get(i)
+            label = "今天" if i == 0 else f"{d.month}月{d.day}日"
+            if usage is None:
+                days_detail.append(f"{label} 无数据")
+            else:
+                bar = "█" * max(1, min(int(usage * 0.8), 8))
+                cost = round(usage * PRICE_PER_KWH, 2)
+                days_detail.append(f"{label} {bar} {usage:.3f}度（{cost}元）")
+                valid_usages.append(usage)
+
+        if valid_usages:
+            avg_usage = round(sum(valid_usages) / len(valid_usages), 2)
+            avg_cost = round(avg_usage * PRICE_PER_KWH, 2)
+            days_left = int(balance / (avg_usage * PRICE_PER_KWH)) if avg_usage > 0 else None
+            days_left_text = f"约 {days_left} 天" if days_left and days_left > 0 else "不足1天"
+        else:
+            avg_usage = 0.0
+            avg_cost = 0.0
+            days_left_text = "--"
+
+        status = "🔴 欠费" if balance < 0 else "🟠 预警" if balance < WARN_THRESHOLD else "🟢 正常"
+        warn = f"\n⚠️ 余额不足{ALERT_THRESHOLD}元，请及时充值！" if balance < ALERT_THRESHOLD else ""
+
+        detail_text = "\n".join(days_detail)
+        today_text = f"{today_usage:.3f}" if today_usage is not None else "--"
+        yesterday_text = f"{yesterday_usage:.3f}" if yesterday_usage is not None else "--"
+
+        yield at_reply(
+            f"\n🏠 {addr} {display_name}\n"
+            f"💰 余额：{balance} 元\n"
+            f"📊 状态：{status}\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"⚡ 今日用电：{today_text} 度\n"
+            f"⚡ 昨日用电：{yesterday_text} 度\n"
+            f"📊 近14天日均：{avg_usage:.3f} 度/天\n"
+            f"💰 日均电费：{avg_cost} 元/天\n"
+            f"📅 预计可用：{days_left_text}\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"📊 近14天每日用电（10:00-次日10:00）：\n{detail_text}\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"🕐 更新时间：{record_time}{warn}"
+        )
+
+    # ===== 详情 =====
+    @filter.command("详情")
+    async def detail(self, event: AstrMessageEvent):
+        if not is_allowed(event):
+            return
+        openid = event.get_sender_id()
+        addr = db.get_bind_addr(openid)
+
+        def at_reply(text):
+            at_tag = f'<qqbot-at-user id="{openid}" />'
+            return event.chain_result([Plain(f"{at_tag}\n{text}")])
+
+        if not addr:
+            yield at_reply("\n❌ 你还没有绑定宿舍")
+            return
+
+        result = db.get_user_balance(addr)
+        if not result:
+            yield at_reply("\n❌ 暂无数据")
+            return
+
+        hourly_data = db.get_hourly_usage(addr, 24)
+        chart = draw_bar_chart(hourly_data, 12)
+
+        yield at_reply(
+            f"\n⚡ {addr} 小时详情\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"{chart}\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"🕐 更新：{result['record_time']}\n"
+            f"📌 小时用电受学校网站数据更新延迟影响，仅供参考\n"
+            f"📌 建议以「查」里的 14 天日用电为准"
+        )
+
+    # ===== 帮助 =====
+    @filter.command("帮助")
+    async def help(self, event: AstrMessageEvent):
+        if not is_allowed(event):
+            return
+        yield event.plain_result(
+            "📖 使用指南\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "📝 绑定：/绑定 NS07N0488\n"
+            "⚡ 查询：/查（近14天日用电）\n"
+            "📊 详情：/详情（小时图，仅供参考）\n"
+            "🔕 忽略：/忽略（屏蔽低余额提醒）\n"
+            "🔓 解绑：/解绑\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "💡 NS=南校，BS=北校\n"
+            "💡 日用电按 10:00 - 次日 10:00 统计"
+        )
+
+    async def terminate(self):
+        if self._fetch_task:
+            self._fetch_task.cancel()
+            try:
+                await self._fetch_task
+            except asyncio.CancelledError:
+                pass
+        await spider.close_client()
+        logger.info("👋 电管Doro 插件已卸载")
