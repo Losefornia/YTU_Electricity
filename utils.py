@@ -2,10 +2,13 @@
 import re
 from datetime import datetime, timedelta
 from collections import defaultdict
+from io import BytesIO
 
 PRICE_PER_KWH = 0.55
 DAY_SPLIT_HOUR = 10
 
+
+# ========= 地址处理 =========
 
 def match_key(addr):
     if not addr:
@@ -41,6 +44,8 @@ def convert_dorm_format(addr):
     return f"{campus}{addr}"
 
 
+# ========= 时间边界 =========
+
 def get_day_boundary(dt, offset_days=0):
     target = dt + timedelta(days=offset_days)
     return target.replace(hour=DAY_SPLIT_HOUR, minute=0, second=0, microsecond=0)
@@ -74,6 +79,8 @@ def get_yesterday_end(now=None):
     return get_day_boundary(now, 0)
 
 
+# ========= 用量计算 =========
+
 def calc_usage_with_recharge(balances):
     if len(balances) < 2:
         return 0.0
@@ -92,7 +99,6 @@ def calc_14day_usage(addr, now=None):
     """
     一次查库，返回 {offset_days: usage}。
     offset_days=0 为今天（10:00 日界），1 为昨天，... 13 为第 14 天。
-    缺失的 key 不存在，调用方用 .get(i) 判断。
     """
     from . import db
     now = now or datetime.now()
@@ -109,7 +115,6 @@ def calc_14day_usage(addr, now=None):
     if len(rows) < 2:
         return {}
 
-    # 按 10:00 日界分桶
     buckets = defaultdict(list)
     for r in rows:
         try:
@@ -129,7 +134,9 @@ def calc_14day_usage(addr, now=None):
     return result
 
 
-def draw_bar_chart(data, max_bars=12):
+# ========= 文字版柱状图（/详情 用） =========
+
+def draw_bar_chart_text(data, max_bars=12):
     if not data:
         return "暂无数据"
     items = list(data.items())[-max_bars:]
@@ -148,3 +155,72 @@ def draw_bar_chart(data, max_bars=12):
         else:
             chart.append(f"{time_range} 无数据")
     return '\n'.join(chart) if chart else "暂无数据"
+
+
+# ========= 图片版柱状图（/电费图 用，matplotlib 延迟导入） =========
+
+def draw_bar_chart_img(usage_map, addr=""):
+    """
+    usage_map: {offset_days: usage}，来自 calc_14day_usage
+    offset 0=今天，1=昨天，... 13=14天前
+    返回 BytesIO(PNG)
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib import font_manager
+    import matplotlib.pyplot as plt
+
+    # 中文字体：找到哪个用哪个（容器自带 Noto Sans CJK SC）
+    installed = {f.name for f in font_manager.fontManager.ttflist}
+    for name in ["Noto Sans CJK SC", "WenQuanYi Zen Hei", "WenQuanYi Micro Hei",
+                 "Noto Sans SC", "SimHei", "Microsoft YaHei", "Source Han Sans SC"]:
+        if name in installed:
+            plt.rcParams["font.sans-serif"] = [name]
+            break
+    plt.rcParams["axes.unicode_minus"] = False
+
+    if not usage_map:
+        return None
+
+    sorted_items = sorted(usage_map.items(), key=lambda x: x[0])
+    date_text, week_text, usage_data = [], [], []
+
+    now = datetime.now()
+    today_start = get_today_start(now)
+    for offset, usage_val in sorted_items:
+        day_dt = today_start - timedelta(days=offset)
+        date_text.append(f"{day_dt.month:02d}-{day_dt.day:02d}")
+        week_text.append(["周一", "周二", "周三", "周四", "周五", "周六", "周日"][day_dt.weekday()])
+        usage_data.append(usage_val)
+
+    xtick_labels = [f"{d}\n{w}" for d, w in zip(date_text, week_text)]
+    x = list(range(len(date_text)))
+
+    fig, ax = plt.subplots(figsize=(9, 5), dpi=150)
+    bars = ax.bar(x, usage_data, color="#87CEEB", alpha=0.7, width=0.5, label="日用电量")
+    ax.plot(x, usage_data, marker="o", color="#2E86AB", linewidth=2, markersize=4, label="趋势线")
+
+    for bar, val in zip(bars, usage_data):
+        height = bar.get_height()
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            height + 0.22,
+            f"{val}",
+            ha="center", va="bottom", fontsize=7, color="#c82423",
+        )
+
+    title_addr = convert_dorm_format(addr) if addr else "宿舍"
+    ax.set_title(f"{title_addr} 近14天用电量统计（单位：度）", fontsize=10)
+    ax.set_xlabel("日期")
+    ax.set_ylabel("用电量(度)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(xtick_labels, fontsize=7)
+    ax.legend(fontsize=7)
+    ax.grid(axis="y", alpha=0.3)
+
+    buf = BytesIO()
+    plt.tight_layout()
+    plt.savefig(buf, format="png", bbox_inches="tight")
+    buf.seek(0)
+    plt.close(fig)
+    return buf
