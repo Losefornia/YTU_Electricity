@@ -5,6 +5,8 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 import re
 import asyncio
+import tempfile
+from pathlib import Path
 from datetime import datetime, timedelta
 
 from . import db
@@ -342,11 +344,22 @@ class DianFeiPlugin(Star):
             yield at_reply("\n❌ 绘图失败")
             return
 
+        # 存成文件再发（image_result 需要路径字符串）
+        try:
+            tmp_dir = Path(tempfile.gettempdir()) / "dianfei_charts"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            img_path = tmp_dir / f"{openid}.png"
+            img_path.write_bytes(img_buf.getvalue())
+        except Exception as e:
+            logger.error(f"[电费图] 保存图片失败: {e}", exc_info=e)
+            yield at_reply(f"\n❌ 保存图片失败：{e}")
+            return
+
         at_tag = f'<qqbot-at-user id="{openid}" />'
         yield event.chain_result([
             Plain(f"{at_tag}\n📊 {convert_dorm_format(addr)} 近14天用电量"),
         ])
-        yield event.image_result(img_buf.getvalue())
+        yield event.image_result(str(img_path))
 
     # ===== 帮助 =====
     @filter.command("帮助")
