@@ -13,7 +13,7 @@ except Exception:
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "meters_data.db"
 
-KEEP_DAYS = 16        # 保留 16 天（14天查询 + 10:00 日界余量）
+KEEP_DAYS = 35       # 保留 35 天（14天查询 + 10:00 日界余量）
 CLEAN_DAYS = 7        # 每 7 天清一次
 
 _local = threading.local()
