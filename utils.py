@@ -182,7 +182,9 @@ def draw_bar_chart_img(usage_map, addr=""):
     if not usage_map:
         return None
 
-    sorted_items = sorted(usage_map.items(), key=lambda x: x[0])
+    # ★ 关键：reverse=True，让 14 天前在左、今天在右（时间从左往右递增）
+    sorted_items = sorted(usage_map.items(), key=lambda x: x[0], reverse=True)
+
     date_text, week_text, usage_data = [], [], []
 
     now = datetime.now()
