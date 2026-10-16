@@ -1,16 +1,47 @@
+# utils.py
 import re
 from datetime import datetime, timedelta
 from collections import defaultdict
-import matplotlib.pyplot as plt
 from io import BytesIO
-
-# ========= 阿里云ECS Linux字体配置 =========
-plt.rcParams['font.sans-serif'] = ['WenQuanYi Zen Hei']
-plt.rcParams['axes.unicode_minus'] = False
 
 PRICE_PER_KWH = 0.55
 DAY_SPLIT_HOUR = 10
 
+
+# ========= 字体延迟配置（只做一次） =========
+_FONT_READY = False
+
+
+def _setup_font():
+    """首次绘图时初始化 matplotlib 和中文字体。"""
+    global _FONT_READY
+    if _FONT_READY:
+        return
+
+    import matplotlib
+    matplotlib.use("Agg")  # 无 GUI 后端，服务器必须
+    from matplotlib import font_manager
+    import matplotlib.pyplot as plt
+
+    # 按优先级找系统中文字体
+    candidates = [
+        "WenQuanYi Zen Hei",
+        "WenQuanYi Micro Hei",
+        "Noto Sans CJK SC",
+        "Noto Sans SC",
+        "Source Han Sans SC",
+        "Microsoft YaHei",
+        "SimHei",
+    ]
+    installed = {f.name for f in font_manager.fontManager.ttflist}
+    chosen = next((c for c in candidates if c in installed), None)
+    if chosen:
+        plt.rcParams["font.sans-serif"] = [chosen]
+    plt.rcParams["axes.unicode_minus"] = False
+    _FONT_READY = True
+
+
+# ========= 地址处理 =========
 
 def match_key(addr):
     if not addr:
@@ -45,6 +76,8 @@ def convert_dorm_format(addr):
     return f"{campus}{addr}"
 
 
+# ========= 时间边界 =========
+
 def get_day_boundary(dt, offset_days=0):
     target = dt + timedelta(days=offset_days)
     return target.replace(hour=DAY_SPLIT_HOUR, minute=0, second=0, microsecond=0)
@@ -78,6 +111,8 @@ def get_yesterday_end(now=None):
     return get_day_boundary(now, 0)
 
 
+# ========= 用量计算 =========
+
 def calc_usage_with_recharge(balances):
     if len(balances) < 2:
         return 0.0
@@ -96,7 +131,6 @@ def calc_14day_usage(addr, now=None):
     """
     一次查库，返回 {offset_days: usage}。
     offset_days=0 为今天（10:00 日界），1 为昨天，... 13 为第 14 天。
-    缺失的 key 不存在，调用方用 .get(i) 判断。
     """
     from . import db
     now = now or datetime.now()
@@ -110,7 +144,6 @@ def calc_14day_usage(addr, now=None):
     )
     if len(rows) < 2:
         return {}
-    # 按 10:00 日界分桶
     buckets = defaultdict(list)
     for r in rows:
         try:
@@ -129,25 +162,29 @@ def calc_14day_usage(addr, now=None):
     return result
 
 
-# ========== 【重写绘图函数 draw_bar_chart，返回图片BytesIO】 ==========
-# 入参：data 是 calc_14day_usage 返回的 {offset:usage} 字典
-def draw_bar_chart(data):
+# ========= 绘图 =========
+
+def draw_bar_chart(data, addr=""):
+    """
+    data: {offset: usage}，来自 calc_14day_usage
+    addr: 宿舍地址（用于标题）
+    返回 BytesIO(PNG)，失败返回 None
+    """
     if not data:
         return None
 
-    # offset 0=今天，13=14天前，排序从最早到最新
+    _setup_font()  # 延迟初始化 matplotlib + 字体
+    import matplotlib.pyplot as plt
+
     sorted_items = sorted(data.items(), key=lambda x: x[0])
-    date_text = []
-    week_text = []
-    usage_data = []
+    date_text, week_text, usage_data = [], [], []
 
     now = datetime.now()
     today_start = get_today_start(now)
     for offset, usage_val in sorted_items:
         day_dt = today_start - timedelta(days=offset)
         date_text.append(f"{day_dt.month:02d}-{day_dt.day:02d}")
-        week_cn = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][day_dt.weekday()]
-        week_text.append(week_cn)
+        week_text.append(["周一", "周二", "周三", "周四", "周五", "周六", "周日"][day_dt.weekday()])
         usage_data.append(usage_val)
 
     xtick_labels = [f"{d}\n{w}" for d, w in zip(date_text, week_text)]
@@ -157,7 +194,6 @@ def draw_bar_chart(data):
     bars = ax.bar(x, usage_data, color="#87CEEB", alpha=0.7, width=0.5, label="日用电量")
     ax.plot(x, usage_data, marker="o", color="#2E86AB", linewidth=2, markersize=4, label="趋势线")
 
-    # 柱子顶部深红色文字，抬高位置防止和曲线重叠
     for bar, val in zip(bars, usage_data):
         height = bar.get_height()
         ax.text(
@@ -167,10 +203,11 @@ def draw_bar_chart(data):
             ha="center",
             va="bottom",
             fontsize=7,
-            color="#c82423"
+            color="#c82423",
         )
 
-    ax.set_title("南校07N-422 近14天用电量统计（单位：度）", fontsize=10)
+    title_addr = convert_dorm_format(addr) if addr else "宿舍"
+    ax.set_title(f"{title_addr} 近14天用电量统计（单位：度）", fontsize=10)
     ax.set_xlabel("日期")
     ax.set_ylabel("用电量(度)")
     ax.set_xticks(x)
@@ -182,5 +219,5 @@ def draw_bar_chart(data):
     plt.tight_layout()
     plt.savefig(buf, format="png", bbox_inches="tight")
     buf.seek(0)
-    plt.close()
+    plt.close(fig)
     return buf
