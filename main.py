@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from . import db
 from . import spider
 from .utils import (
-    convert_dorm_format, draw_bar_chart,
+    convert_dorm_format, draw_bar_chart_text,
     PRICE_PER_KWH, calc_14day_usage,
 )
 
@@ -271,7 +271,7 @@ class DianFeiPlugin(Star):
             f"🕐 更新时间：{record_time}{warn}"
         )
 
-    # ===== 详情 =====
+    # ===== 详情（文字小时图） =====
     @filter.command("详情")
     async def detail(self, event: AstrMessageEvent):
         if not is_allowed(event):
@@ -293,7 +293,7 @@ class DianFeiPlugin(Star):
             return
 
         hourly_data = db.get_hourly_usage(addr, 24)
-        chart = draw_bar_chart(hourly_data, 12)
+        chart = draw_bar_chart_text(hourly_data, 12)
 
         yield at_reply(
             f"\n⚡ {addr} 小时详情\n"
@@ -304,6 +304,49 @@ class DianFeiPlugin(Star):
             f"📌 小时用电受学校网站数据更新延迟影响，仅供参考\n"
             f"📌 建议以「查」里的 14 天日用电为准"
         )
+
+    # ===== 电费图（matplotlib 图片） =====
+    @filter.command("电费图")
+    async def cmd_electric_img(self, event: AstrMessageEvent):
+        if not is_allowed(event):
+            return
+        openid = event.get_sender_id()
+        addr = db.get_bind_addr(openid)
+
+        def at_reply(text):
+            at_tag = f'<qqbot-at-user id="{openid}" />'
+            return event.chain_result([Plain(f"{at_tag}\n{text}")])
+
+        if not addr:
+            yield at_reply("\n❌ 你还没有绑定宿舍，请发送「绑定 宿舍号」")
+            return
+
+        usage_map = calc_14day_usage(addr)
+        if not usage_map:
+            yield at_reply("\n❌ 14天用电数据不足，无法绘图")
+            return
+
+        try:
+            from .utils import draw_bar_chart_img
+            img_buf = draw_bar_chart_img(usage_map, addr)
+        except ImportError as e:
+            logger.error(f"[电费图] 缺少 matplotlib: {e}")
+            yield at_reply(f"\n❌ 缺少 matplotlib：{e}\n请执行 pip install matplotlib")
+            return
+        except Exception as e:
+            logger.error(f"[电费图] 绘图异常: {e}", exc_info=e)
+            yield at_reply(f"\n❌ 绘图失败：{e}")
+            return
+
+        if not img_buf:
+            yield at_reply("\n❌ 绘图失败")
+            return
+
+        at_tag = f'<qqbot-at-user id="{openid}" />'
+        yield event.chain_result([
+            Plain(f"{at_tag}\n📊 {convert_dorm_format(addr)} 近14天用电量"),
+        ])
+        yield event.image_result(img_buf.getvalue())
 
     # ===== 帮助 =====
     @filter.command("帮助")
@@ -316,6 +359,7 @@ class DianFeiPlugin(Star):
             "📝 绑定：/绑定 NS07N0488\n"
             "⚡ 查询：/查（近14天日用电）\n"
             "📊 详情：/详情（小时图，仅供参考）\n"
+            "📈 电费图：/电费图（近14天彩色柱状图）\n"
             "🔕 忽略：/忽略（屏蔽低余额提醒）\n"
             "🔓 解绑：/解绑\n"
             "━━━━━━━━━━━━━━━━\n"
